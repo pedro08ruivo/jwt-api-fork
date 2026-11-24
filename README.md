@@ -170,13 +170,27 @@ O modelo `User` já existente representa os atendentes e administradores.
 7. Empréstimo e devolução devem usar **transação do Sequelize** (`db.transaction`), para o estoque nunca ficar inconsistente.
 8. Atendente desativado (`active = false`) não consegue fazer login.
 
+As regras de empréstimo estão disponíveis nestes endpoints (todos exigem `Authorization: Bearer <token>`):
+
+| Método | Rota | Uso |
+|---|---|---|
+| POST | `/v1/readers` | Cadastra leitor `{ name, cpf, email?, phone? }` |
+| POST | `/v1/loans` | Abre empréstimo `{ bookId, readerId }`; o atendente vem do token |
+| GET | `/v1/loans?status=ATIVO\|ATRASADO\|DEVOLVIDO` | Lista empréstimos e calcula/sincroniza os atrasos |
+| PATCH | `/v1/loans/:id/return` | Devolve livro, atualiza estoque e calcula multa |
+| GET | `/v1/readers/:id/loans` | Consulta histórico do leitor |
+
+Empréstimos retornam **409 Conflict** quando não há exemplares, o leitor atingiu o limite, possui atraso, a devolução já foi registrada ou a exclusão violaria vínculos. Categorias e autores não podem ser excluídos enquanto estiverem ligados a livros. Livros com empréstimos ativos/atrasados ou histórico também não são excluídos para preservar o histórico referencial.
+
+As escritas de empréstimo/devolução e as alterações de estoque usam transações SQLite `IMMEDIATE`, que serializam as operações concorrentes antes das verificações de estoque e limite. Escritas de categoria, autor e livro, assim como o gerenciamento de atendentes, exigem administrador; leitores e empréstimos exigem autenticação.
+
 ## 4. Autenticação com refresh token
 
-Hoje a API gera um único token de 1 hora e usa uma blacklist (`logout_list`) no logout. O trabalho é trocar isso por um fluxo de **dois tokens**.
+A API usa **access token** de curta duração e **refresh token** rotativo. O access token fica na blacklist `logout_list` no logout; refresh tokens são persistidos e revogados em `RefreshTokens`.
 
 ### 4.1 Requisitos
 
-- **Access token**: JWT assinado com `JWT_SECRET`, validade de **15 minutos**, payload com `id`, `name`, `email` e `isAdmin`. Enviado no header `Authorization: Bearer <token>`.
+- **Access token**: JWT assinado com `JWT_SECRET`, normalmente válido por **15 minutos** (900 segundos), payload com `id`, `name`, `email` e `isAdmin`. Enviado no header `Authorization: Bearer <token>`. Para o teste atual de refresh, a validade foi reduzida temporariamente para **30 segundos** em `auth/auth.service.js`.
 - **Refresh token**: assinado com `JWT_REFRESH_SECRET` (ou string aleatória com `crypto.randomBytes`), validade de **7 dias**, **salvo na tabela `RefreshToken`**.
 - `POST /v1/auth/login` retorna `{ accessToken, refreshToken, user }`.
 - `POST /v1/auth/refresh` recebe `{ refreshToken }`, valida se existe no banco, não está revogado nem expirado, e devolve um **novo par** de tokens. O refresh antigo é revogado (**rotação de refresh token**).
@@ -185,6 +199,8 @@ Hoje a API gera um único token de 1 hora e usa uma blacklist (`logout_list`) no
 - `GET /v1/auth/me` retorna os dados do usuário logado.
 - Middleware `isAdmin` que retorna **403** quando um atendente acessa rota de administrador.
 - Corrigir o middleware atual para responder **401** (e não 400) quando o token é inválido ou expirou. O front depende desse código para saber que precisa renovar.
+
+O login retorna `{ accessToken, refreshToken, user }`. No front, ambos os tokens ficam em cookies `HttpOnly`, `SameSite=Lax`; o access cookie segue a duração de teste de 30 segundos e o refresh cookie dura 7 dias. Para voltar ao access token de 15 minutos, configure `900` segundos no serviço da API e `900` segundos no cookie do front. `604800` segundos correspondem a **7 dias**, a duração do refresh token — não a 15 minutos. `JWT_REFRESH_SECRET` deve ser diferente de `JWT_SECRET` e configurado no `.env` local. O log SQL do Sequelize fica desativado para não registrar valores de tokens.
 
 ### 4.2 Fluxo esperado
 
@@ -200,9 +216,10 @@ Hoje a API gera um único token de 1 hora e usa uma blacklist (`logout_list`) no
 
 ### 4.3 No front-end
 
-- Guardar os tokens (localStorage/sessionStorage na web, AsyncStorage/SecureStore no mobile) e explicar no README os riscos da escolha.
-- Criar um **interceptor** (Axios ou wrapper do `fetch`) que, ao receber 401, chama `/auth/refresh` **uma única vez** e repete a requisição.
-- Se várias requisições derem 401 ao mesmo tempo, deve sair **apenas uma** chamada de refresh; as demais aguardam numa fila.
+- Na web, guardar access e refresh tokens em cookies `HttpOnly`, `SameSite=Lax`; isso impede leitura direta por JavaScript, embora XSS ainda possa emitir requisições e `SameSite` não substitua proteção CSRF em todos os cenários.
+- O cliente Axios chama o backend-for-frontend `/api/backend/*`; ao receber 401, o interceptor chama `/api/auth/refresh` uma única vez e repete a requisição original.
+- Requisições concorrentes compartilham a mesma Promise de refresh para evitar rotação duplicada; se a renovação falhar, cookies são limpos e a sessão volta à tela de login.
+- O logout chama a API, revoga refresh e access tokens e apaga os cookies.
 - Rotas/telas protegidas: sem sessão válida, redireciona para o login.
 - Esconder menus de administrador para atendentes (sem depender só disso: a API também deve bloquear).
 
@@ -229,7 +246,7 @@ Todas as rotas abaixo, exceto login e refresh, exigem access token. **(A)** = so
 | GET | `/v1/loans?status=ATIVO\|ATRASADO\|DEVOLVIDO` | Listar empréstimos |
 | GET | `/v1/reports/dashboard` | Totais: livros, emprestados, atrasados, multas **(A)** |
 
-Atenção: a rota `POST /v1/user` hoje é pública. No sistema final, apenas administradores podem criar atendentes. Crie um **seed** que gera o primeiro admin ao iniciar a API.
+A rota `POST /v1/user` exige autenticação e perfil administrador. O primeiro administrador é criado por seed na inicialização quando o banco não possui usuários. Configure `ADMIN_NAME`, `ADMIN_USERNAME`, `ADMIN_EMAIL` e `ADMIN_PASSWORD` no `.env`; em produção, substitua `ADMIN_PASSWORD` por uma senha forte.
 
 Organize cada recurso numa pasta própria, seguindo o padrão do projeto:
 
@@ -295,3 +312,32 @@ O que entregar:
 - **Paginação** nas listagens (`?page=&limit=`).
 - Validação de entrada com **Joi** ou **Zod**.
 - **Swagger** com a documentação da API.
+
+## Administrador inicial e execução
+
+Na primeira sincronização, o banco cria um administrador padrão caso não exista nenhum usuário:
+
+- E-mail: `admin@biblioteca.com`
+- Senha: `123456`
+- Usuário: `admin`
+
+Em produção, substitua essas credenciais pelas variáveis `ADMIN_NAME`, `ADMIN_USERNAME`, `ADMIN_EMAIL` e `ADMIN_PASSWORD`.
+
+```bash
+copy .envex .env
+npm install
+npm start
+```
+
+A API ficará disponível em `http://localhost:3000/v1`.
+
+## Entregáveis incluídos
+
+- Coleção do Postman/Insomnia: `api.postman_collection.json`.
+- Banco SQLite local excluído do Git.
+- Arquivo `.env` excluído do Git.
+- Modelo de ambiente versionado em `.envex`.
+- Refresh token rotativo, revogação no logout e blacklist do access token.
+- Middleware de administrador com resposta `403` para atendentes.
+- Transações SQLite para empréstimos e devoluções.
+- Multa de R$ 1 por dia de atraso.

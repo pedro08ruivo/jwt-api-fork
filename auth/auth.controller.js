@@ -2,23 +2,24 @@ const authService = require('./auth.service');
 
 const authController = {
     async login(req, res) {
-        try {
-            const { email, password } = req.body;
-            const token = await authService.login(email, password);
-            res.json({ token });
-        } catch (error) {
-            res.status(401).json({ error: error.message });
-        }
+        const tokens = await authService.login(req.body.email, req.body.password);
+        return res.json(tokens);
+    },
+
+    async refresh(req, res) {
+        const tokens = await authService.refresh(req.body.refreshToken);
+        return res.json(tokens);
     },
 
     async logout(req, res) {
-        try {
-            const token = req.headers.authorization.split(' ')[1];
-            await authService.logout(token);
-            res.json({ message: 'Logout successful' });
-        } catch (error) {
-            res.status(400).json({ error: error.message });
-        }
+        const accessToken = req.header('Authorization')?.replace(/^Bearer\s+/i, '');
+        const result = await authService.logout(accessToken, req.body.refreshToken, req.user.id);
+        return res.json(result);
+    },
+
+    async me(req, res) {
+        const user = await authService.getCurrentUser(req.user.id);
+        return res.json(user);
     }
 };
 

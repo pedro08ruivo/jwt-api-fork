@@ -15,6 +15,11 @@ const User = db.define('User', {
         allowNull: false,
         defaultValue: false
     },
+    active: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: true
+    },
     username: {
         type: DataTypes.STRING,
         allowNull: false,
